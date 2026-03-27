@@ -1,0 +1,19 @@
+# Recreate horizon_data for h=0 manually
+work_data <- df %>%
+  mutate(inter_term = centered_vol * target)
+
+horizon_data <- work_data %>%
+  mutate(lhs_col = lead(log_ecy2_dp_m, 0))
+
+# Run feols and check coefficient names
+test <- fixest::feols(
+  lhs_col ~ target + dummy_r1 + dummy_r2 + dummy_r3 + dummy_r4 |
+    centered_vol + inter_term ~
+    iv1_dummy_r1 + iv1_dummy_r2 + iv1_dummy_r3 + iv1_dummy_r4 +
+    iv2_dummy_r1 + iv2_dummy_r2 + iv2_dummy_r3 + iv2_dummy_r4,
+  data       = horizon_data,
+  panel.id   = ~id + date,
+  vcov       = "hetero"
+)
+
+names(coef(test))
