@@ -318,7 +318,6 @@ df <- df_raw %>%
 # -----------------------------------------------------------------------------
 
 df <- df %>%
-  add_regimes() %>%
   make_instrument(
     vol_col     = vol_col,
     shock_col   = "target",
