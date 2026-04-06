@@ -1,0 +1,128 @@
+# =============================================================================
+# 02d_line_plots_cumulated.R
+# Simple line plots: target shock vs cumulated change in each outcome
+#
+# For each outcome and horizon h, plots over time:
+#   - target_t (the MP shock)
+#   - y_{t+h} - y_{t-1} (cumulative change from t-1 to t+h)
+#
+# This helps identify which periods/episodes are driving the relationship
+# =============================================================================
+
+source(here::here("R", "00_setup.R"))
+library(patchwork)
+
+# -----------------------------------------------------------------------------
+# CONFIG
+# -----------------------------------------------------------------------------
+
+outcomes <- c(
+  "log_gdp_sa",
+  "log_core_cpi",
+  "household_mortgage_rates_sa",
+  "gb2yt",
+  "gb5yt",
+  "gb10yt"
+)
+
+outcome_labels <- c(
+  log_gdp_sa                  = "Log GDP",
+  log_core_cpi                = "Log Core CPI",
+  household_mortgage_rates_sa = "Mortgage Rate",
+  gb2yt                       = "2Y Gilt Yield",
+  gb5yt                       = "5Y Gilt Yield",
+  gb10yt                      = "10Y Gilt Yield"
+)
+
+# Pick horizons to plot
+HORIZONS <- c(1, 6, 12, 24)
+
+# -----------------------------------------------------------------------------
+# HELPER: line plot of target and cumulated outcome change over time
+# -----------------------------------------------------------------------------
+
+plot_lines <- function(df, outcome, h) {
+
+  plot_df <- as.data.frame(df) %>%
+    arrange(date) %>%
+    mutate(
+      long_diff = lead(.data[[outcome]], h) - lag(.data[[outcome]], 1),
+      target_t  = target
+    ) %>%
+    dplyr::select(date, long_diff, target_t) %>%
+    na.omit()
+
+  # Rescale target to long_diff range for overlay
+  ld_range <- range(plot_df$long_diff, na.rm = TRUE)
+  tg_range <- range(plot_df$target_t,  na.rm = TRUE)
+  scale_f  <- diff(ld_range) / diff(tg_range)
+  offset   <- ld_range[1] - tg_range[1] * scale_f
+
+  plot_df <- plot_df %>%
+    mutate(target_scaled = target_t * scale_f + offset)
+
+  ggplot(plot_df, aes(x = date)) +
+    geom_hline(yintercept = 0, colour = "grey80", linewidth = 0.3) +
+    # Cumulated outcome change
+    geom_line(aes(y = long_diff), colour = "#0072B2",
+              linewidth = 0.6) +
+    # Target shock rescaled
+    geom_line(aes(y = target_scaled), colour = "#E69F00",
+              linewidth = 0.5, linetype = "dashed") +
+    # Shade periods where they move together vs opposite
+    geom_ribbon(
+      aes(
+        ymin = pmin(long_diff, target_scaled),
+        ymax = pmax(long_diff, target_scaled),
+        fill = long_diff * target_t < 0   # TRUE = opposite signs (expected)
+      ),
+      alpha = 0.12
+    ) +
+    scale_fill_manual(
+      values = c("TRUE" = "#009E73", "FALSE" = "#D55E00"),
+      labels = c("TRUE" = "Opposite signs", "FALSE" = "Same signs"),
+      name   = NULL
+    ) +
+    scale_y_continuous(
+      name     = glue("y_{{t+{h}}} - y_{{t-1}}"),
+      sec.axis = sec_axis(
+        ~ (. - offset) / scale_f,
+        name = "MP shock (target)"
+      )
+    ) +
+    labs(
+      x        = NULL,
+      title    = glue("h = {h} months"),
+      subtitle = outcome_labels[[outcome]]
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      axis.title.y       = element_text(colour = "#0072B2"),
+      axis.title.y.right = element_text(colour = "#E69F00"),
+      legend.position    = "bottom"
+    )
+}
+
+# -----------------------------------------------------------------------------
+# GENERATE: one page per outcome, one panel per horizon
+# -----------------------------------------------------------------------------
+
+outcomes %>% walk(function(v) {
+
+  plots <- HORIZONS %>%
+    map(~plot_lines(df, v, .x))
+
+  p <- wrap_plots(plots, ncol = 2) +
+    plot_annotation(
+      title    = glue("Cumulated change: {outcome_labels[[v]]} vs MP shock"),
+      subtitle = paste(
+        "Blue = cumulated outcome change (left axis)",
+        "Orange dashed = target shock (right axis)",
+        "Green shading = opposite signs (expected transmission)",
+        "Red shading = same signs (unexpected)",
+        sep = "  |  "
+      )
+    )
+
+  print(p)
+})
