@@ -1,0 +1,274 @@
+# =============================================================================
+# structural_breaks.R
+# Structural break detection for identifying regime change dates
+# Designed for GC repo vol series but works for any series
+#
+# Methods:
+#   1. Bai-Perron (1998, 2003) — multiple structural breaks, data-driven
+#   2. Chow test — test for break at specific known dates
+#   3. CUSUM / MOSUM — sequential monitoring for parameter stability
+#   4. Zivot-Andrews — unit root test allowing for one structural break
+#
+# LITERATURE:
+#   Bai & Perron (1998) Econometrica — multiple break estimation
+#   Bai & Perron (2003) Journal of Applied Econometrics — implementation
+#   Andrews (1993) Econometrica — sup-F test
+# =============================================================================
+
+source(here::here("R", "00_setup.R"))
+library(strucchange)   # Bai-Perron, CUSUM, Chow
+library(tseries)       # Zivot-Andrews
+library(patchwork)
+
+# -----------------------------------------------------------------------------
+# CONFIG — update series name and known candidate dates
+# -----------------------------------------------------------------------------
+
+SERIES        <- "ronia_br"          # GC repo vol column in df
+SERIES_LABEL  <- "GC Repo Rate (RONIA Spread)"
+MAX_BREAKS    <- 5                   # maximum number of breaks to consider
+
+# Candidate dates you already suspect — used for Chow tests
+CANDIDATE_DATES <- as.Date(c(
+  "2004-08-01",   # Pre-RAF end
+  "2008-10-01",   # GFC
+  "2012-02-01",   # LTRO / ample reserves
+  "2018-05-01",   # SONIA reform
+  "2022-09-01"    # QT / STR / Truss
+))
+
+# -----------------------------------------------------------------------------
+# PREP: extract clean time series
+# -----------------------------------------------------------------------------
+
+series_df <- as.data.frame(df) %>%
+  arrange(date) %>%
+  dplyr::select(date, value = all_of(SERIES)) %>%
+  filter(!is.na(value))
+
+series_ts <- ts(series_df$value)
+dates_vec <- series_df$date
+
+cat(glue("\nSeries: {SERIES_LABEL}"))
+cat(glue("\nObservations: {nrow(series_df)}"))
+cat(glue("\nDate range: {min(dates_vec)} to {max(dates_vec)}\n\n"))
+
+# -----------------------------------------------------------------------------
+# 1. BAI-PERRON — data-driven multiple breakpoint estimation
+# This is your main tool — let the data tell you where breaks are
+# -----------------------------------------------------------------------------
+
+cat("================================================================\n")
+cat("  1. BAI-PERRON MULTIPLE BREAKPOINT TEST\n")
+cat("  Estimates optimal number and location of structural breaks\n")
+cat("================================================================\n\n")
+
+# Estimate breaks
+bp <- breakpoints(series_ts ~ 1, breaks = MAX_BREAKS, h = 0.1)
+
+# Summary — shows BIC/RSS for each number of breaks
+cat("-- Break selection (BIC minimised) ----------------------------\n")
+print(summary(bp))
+
+# Optimal number of breaks
+bp_opt    <- breakpoints(bp)
+n_breaks  <- length(bp_opt$breakpoints)
+bp_idx    <- bp_opt$breakpoints
+
+# Map indices to dates
+bp_dates  <- dates_vec[bp_idx]
+
+cat(sprintf("\nOptimal number of breaks: %d\n", n_breaks))
+cat("Estimated break dates:\n")
+for (i in seq_along(bp_dates)) {
+  cat(sprintf("  Break %d: %s\n", i, bp_dates[i]))
+}
+
+# Confidence intervals for break dates
+cat("\nConfidence intervals (95%):\n")
+bp_ci <- confint(bp_opt)
+print(bp_ci)
+
+# Regime means
+cat("\nRegime means:\n")
+regime_means <- coef(bp_opt)
+print(regime_means)
+
+# -----------------------------------------------------------------------------
+# 2. CHOW TESTS at candidate dates
+# Tests whether a break exists at each of your pre-specified dates
+# -----------------------------------------------------------------------------
+
+cat("\n================================================================\n")
+cat("  2. CHOW TESTS AT CANDIDATE DATES\n")
+cat("  H0: no structural break at this date\n")
+cat("  Want: p < 0.05 to confirm break at that date\n")
+cat("================================================================\n\n")
+
+chow_results <- CANDIDATE_DATES %>%
+  map_dfr(function(d) {
+    # Find nearest index
+    idx <- which.min(abs(dates_vec - d))
+    tryCatch({
+      sc  <- sctest(series_ts ~ 1, type = "Chow", point = idx)
+      tibble(
+        date      = d,
+        index     = idx,
+        statistic = round(sc$statistic, 3),
+        p_value   = round(sc$p.value, 4),
+        reject    = sc$p.value < 0.05
+      )
+    }, error = function(e) {
+      tibble(date = d, index = idx, statistic = NA, p_value = NA, reject = NA)
+    })
+  })
+
+print(chow_results)
+
+# -----------------------------------------------------------------------------
+# 3. SUP-F / FLUCTUATION TESTS — Andrews (1993)
+# Tests for ANY structural break in the sample (unknown date)
+# -----------------------------------------------------------------------------
+
+cat("\n================================================================\n")
+cat("  3. SUP-F TEST (Andrews 1993)\n")
+cat("  H0: no structural break anywhere in sample\n")
+cat("================================================================\n\n")
+
+fs_test <- Fstats(series_ts ~ 1, from = 0.1)
+cat("Sup-F test:\n")
+print(sctest(fs_test))
+
+# Date of maximum F-statistic (most likely break point)
+max_f_idx  <- fs_test$breakpoint
+max_f_date <- dates_vec[max_f_idx]
+cat(sprintf("\nDate of maximum F-statistic: %s\n", max_f_date))
+
+# -----------------------------------------------------------------------------
+# 4. CUSUM TEST — parameter stability over time
+# -----------------------------------------------------------------------------
+
+cat("\n================================================================\n")
+cat("  4. CUSUM TEST\n")
+cat("  H0: stable parameters throughout sample\n")
+cat("================================================================\n\n")
+
+cusum <- efp(series_ts ~ 1, type = "OLS-CUSUM")
+print(sctest(cusum))
+
+# -----------------------------------------------------------------------------
+# 5. PLOTS
+# -----------------------------------------------------------------------------
+
+cat("\n================================================================\n")
+cat("  5. DIAGNOSTIC PLOTS\n")
+cat("================================================================\n\n")
+
+# -- Plot 1: Series with Bai-Perron breaks and candidate dates ----------------
+p1 <- ggplot(series_df, aes(x = date, y = value)) +
+  # Candidate dates (grey dashed)
+  geom_vline(
+    xintercept = as.numeric(CANDIDATE_DATES),
+    colour = "grey60", linetype = "dashed", linewidth = 0.5
+  ) +
+  # Bai-Perron break dates (red solid)
+  geom_vline(
+    xintercept = as.numeric(bp_dates),
+    colour = "firebrick", linetype = "solid", linewidth = 0.8
+  ) +
+  geom_line(colour = "grey30", linewidth = 0.5) +
+  # Regime means
+  {
+    regime_df <- tibble(
+      xmin  = c(min(dates_vec), bp_dates),
+      xmax  = c(bp_dates, max(dates_vec)),
+      ymean = as.numeric(regime_means[, 1])
+    )
+    geom_segment(
+      data = regime_df,
+      aes(x = xmin, xend = xmax, y = ymean, yend = ymean),
+      colour = "steelblue", linewidth = 1, inherit.aes = FALSE
+    )
+  } +
+  annotate("text", x = CANDIDATE_DATES, y = max(series_df$value) * 0.95,
+           label = format(CANDIDATE_DATES, "%b-%y"),
+           angle = 90, hjust = 1, size = 2.5, colour = "grey50") +
+  annotate("text", x = bp_dates, y = max(series_df$value) * 0.85,
+           label = format(bp_dates, "%b-%y"),
+           angle = 90, hjust = 1, size = 2.5, colour = "firebrick") +
+  labs(
+    title    = glue("Structural breaks: {SERIES_LABEL}"),
+    subtitle = "Red = Bai-Perron breaks  |  Grey dashed = candidate dates  |  Blue = regime means",
+    x = NULL, y = SERIES_LABEL
+  ) +
+  theme_minimal(base_size = 11)
+
+# -- Plot 2: F-statistics over time (Andrews sup-F) ---------------------------
+p2 <- tibble(
+  date    = dates_vec[seq_along(fs_test$Fstats)],
+  f_stat  = fs_test$Fstats
+) %>%
+  ggplot(aes(x = date, y = f_stat)) +
+  geom_line(colour = "steelblue", linewidth = 0.6) +
+  geom_vline(xintercept = as.numeric(max_f_date),
+             colour = "firebrick", linetype = "dashed") +
+  labs(
+    title    = "F-statistics over time (Andrews sup-F)",
+    subtitle = glue("Red dashed = maximum F at {max_f_date}"),
+    x = NULL, y = "F-statistic"
+  ) +
+  theme_minimal(base_size = 11)
+
+# -- Plot 3: CUSUM ------------------------------------------------------------
+p3 <- tibble(
+  date  = dates_vec[seq_along(cusum$process)],
+  cusum = cusum$process
+) %>%
+  ggplot(aes(x = date, y = cusum)) +
+  geom_hline(yintercept = 0, colour = "grey70") +
+  geom_line(colour = "steelblue", linewidth = 0.6) +
+  geom_hline(yintercept = c(-1, 1) * 0.9476,  # 5% critical value
+             colour = "firebrick", linetype = "dashed") +
+  labs(
+    title    = "CUSUM of residuals",
+    subtitle = "Red dashed = 5% critical bounds  |  Exceeding bounds = instability",
+    x = NULL, y = "CUSUM"
+  ) +
+  theme_minimal(base_size = 11)
+
+# -- Plot 4: BIC by number of breaks ------------------------------------------
+p4 <- tibble(
+  n_breaks = 0:MAX_BREAKS,
+  bic      = c(AIC(lm(series_ts ~ 1), k = log(length(series_ts))),
+               bp$RSS["BIC", ] %>% as.numeric() %>% head(MAX_BREAKS))
+) %>%
+  ggplot(aes(x = n_breaks, y = bic)) +
+  geom_line(colour = "steelblue", linewidth = 0.8) +
+  geom_point(size = 2, colour = "steelblue") +
+  geom_vline(xintercept = n_breaks, colour = "firebrick",
+             linetype = "dashed") +
+  labs(
+    title    = "BIC by number of breaks",
+    subtitle = "Red dashed = optimal number",
+    x = "Number of breaks", y = "BIC"
+  ) +
+  theme_minimal(base_size = 11)
+
+print(p1 / (p2 | p3) / p4)
+
+# -----------------------------------------------------------------------------
+# SUMMARY TABLE — for updating BOE_REGIME_DATES
+# -----------------------------------------------------------------------------
+
+cat("\n================================================================\n")
+cat("  SUMMARY: Recommended regime dates\n")
+cat("  Use these to update BOE_REGIME_DATES in 05a_instrument_module.R\n")
+cat("================================================================\n\n")
+
+cat("Bai-Perron estimated breaks:\n")
+for (i in seq_along(bp_dates)) {
+  cat(sprintf("  r%d_end = as.Date('%s')\n", i, bp_dates[i]))
+}
+
+cat("\nComparison with candidate dates:\n")
+print(chow_results %>% dplyr::select(date, p_value, reject))
