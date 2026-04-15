@@ -66,6 +66,14 @@ cat("================================================================\n\n")
 # Estimate breaks
 bp <- breakpoints(series_ts ~ 1, breaks = MAX_BREAKS, h = 0.1)
 
+
+# Option 1: Run Bai-Perron on the SQUARED series
+series_sq <- series_ts^2
+bp_var <- breakpoints(series_sq ~ 1, breaks = MAX_BREAKS)
+
+# Option 2: Run Bai-Perron on absolute deviations from mean
+series_abs <- abs(series_ts - mean(series_ts))
+bp_abs <- breakpoints(series_abs ~ 1, breaks = MAX_BREAKS)
 # Summary — shows BIC/RSS for each number of breaks
 cat("-- Break selection (BIC minimised) ----------------------------\n")
 print(summary(bp))
@@ -94,6 +102,12 @@ cat("\nRegime means:\n")
 regime_means <- coef(bp_opt)
 print(regime_means)
 
+
+
+
+# Option 3: ARCH-LM test for variance clustering
+library(FinTS)
+ArchTest(series_ts)
 # -----------------------------------------------------------------------------
 # 2. CHOW TESTS at candidate dates
 # Tests whether a break exists at each of your pre-specified dates
