@@ -1,0 +1,21 @@
+library(tseries)
+# For GDP at h=0
+work_data <- as.data.frame(df) %>%
+  arrange(date) %>%
+  mutate(
+    inter_term = centered_vol * target,
+    lhs_col    = lead(log_gdp_sa, 0) - lag(log_gdp_sa, 1)
+  )
+
+m <- feols(
+  lhs_col ~ target + centered_vol + inter_term +
+    diff_log_gdp_sa_lag1 + diff_log_gdp_sa_lag2 +
+    lag1_target + lag2_target +
+    lag1_centered_vol + lag2_centered_vol +
+    lag1_effective_exchange_rate +
+    lag1_import_price_index_rolling +
+    lag1_vol_mps + lag2_vol_mps,
+  data = work_data
+)
+
+acf(residuals(m), main = "Residual ACF h=0 GDP")
